@@ -5,6 +5,9 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
+#include <c10/util/intrusive_ptr.h>
+#include <c10d/ProcessGroup.hpp>
+
 #include <type_traits>
 
 #include "cuda_util.h"
@@ -73,11 +76,11 @@ class TransformerEncoderLayer {
     wptr += _hidden_size;
 
     _inter_w_ptr = wptr;
-    wptr += _hidden_size * _intermediate_size;
+    wptr += _hidden_size * _intermediate_size / pg->getSize();
     _inter_b_ptr = wptr;
-    wptr += _intermediate_size;
+    wptr += _intermediate_size / pg->getSize();
     _output_w_ptr = wptr;
-    wptr += _hidden_size * _intermediate_size;
+    wptr += _hidden_size * _intermediate_size / pg->getSize();
     _output_b_ptr = wptr;
     wptr += _hidden_size;
     _ffn_nw_ptr = wptr;
@@ -103,17 +106,22 @@ class TransformerEncoderLayer {
     gptr += _hidden_size;
 
     _grad_inter_w_ptr = gptr;
-    gptr += _hidden_size * _intermediate_size;
+    gptr += _hidden_size * _intermediate_size / pg->getSize();
     _grad_inter_b_ptr = gptr;
-    gptr += _intermediate_size;
+    gptr += _intermediate_size / pg->getSize();
     _grad_output_w_ptr = gptr;
-    gptr += _hidden_size * _intermediate_size;
+    gptr += _hidden_size * _intermediate_size / pg->getSize();
     _grad_output_b_ptr = gptr;
     gptr += _hidden_size;
     _grad_ffn_nw_ptr = gptr;
     gptr += _hidden_size;
     _grad_ffn_nb_ptr = gptr;
     gptr += _hidden_size;
+  }
+
+  void SetPG(c10::intrusive_ptr<c10d::ProcessGroup> pg_) {
+    pg = pg_;
+    allocate_mem_buffer();
   }
 
  private:
@@ -129,8 +137,8 @@ class TransformerEncoderLayer {
     _ctx_bufB_ptr = cuda_malloc<T>(_max_batch_tokens * _heads * _max_seq_len);
     _attn_o_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _hidden_size);
     _ff1_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _hidden_size);
-    _relu_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size);
-    _ff2_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size);
+    _relu_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg->getSize());
+    _ff2_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg->getSize());
 
     // buffer size needed by ffn bw
     size_t sz_ffn_bw = 3 * _max_batch_tokens * _hidden_size +
@@ -240,4 +248,6 @@ class TransformerEncoderLayer {
   T *_grad_output_b_ptr;
   T *_grad_ffn_nw_ptr;
   T *_grad_ffn_nb_ptr;
+
+  c10::intrusive_ptr<c10d::ProcessGroup> pg;
 };

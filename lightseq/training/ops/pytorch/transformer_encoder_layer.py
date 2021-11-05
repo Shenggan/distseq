@@ -26,7 +26,7 @@ class LSTransformerEncoderFunc(Function):
         input,
         input_mask,
         parameters,
-        config,
+        config
     ):
         cuda_module = transformer_cuda_module
         forward_func = (
@@ -89,10 +89,12 @@ class LSTransformerEncoderLayer(nn.Module):
 
     layer_id = 0
 
-    def __init__(self, config, initial_weights=None, initial_biases=None):
+    def __init__(self, config, pg=None, initial_weights=None, initial_biases=None):
         super(LSTransformerEncoderLayer, self).__init__()
 
         self.config = config
+        self.pg = pg
+        self.pg_size = pg.size()
         self.config.layer_id = LSTransformerEncoderLayer.layer_id
         LSTransformerEncoderLayer.layer_id = LSTransformerEncoderLayer.layer_id + 1
 
@@ -126,11 +128,12 @@ class LSTransformerEncoderLayer(nn.Module):
             self.config.hidden_dropout_ratio,
             self.config.pre_layer_norm,
             self.config.activation_fn,
+            self.pg,
         )
 
         hs = self.config.hidden_size
         ims = self.config.intermediate_size
-        self.para_offset = LSTransformerEncoderLayer.gen_offset(hs, ims)
+        self.para_offset = LSTransformerEncoderLayer.gen_offset(hs, ims, self.pg_size)
         self.para = nn.Parameter(torch.Tensor(self.para_offset[-1]))
 
         if initial_weights is None and initial_biases is None:
@@ -186,7 +189,7 @@ class LSTransformerEncoderLayer(nn.Module):
         return config
 
     @staticmethod
-    def gen_offset(hidden_size, intermediate_size):
+    def gen_offset(hidden_size, intermediate_size, pg_size):
         hs, ims = hidden_size, intermediate_size
         sizes = [
             hs * hs * 3,  # attn_qkvw
@@ -195,9 +198,9 @@ class LSTransformerEncoderLayer(nn.Module):
             hs,  # attn_ob
             hs,  # attn_nw
             hs,  # attn_nb
-            hs * ims,  # inter_w
-            ims,  # inter_b
-            hs * ims,  # output_w
+            int(hs * ims / pg_size),  # inter_w
+            int(ims / pg_size),  # inter_b
+            int(hs * ims / pg_size),  # output_w
             hs,  # output_b
             hs,  # ffn_nw
             hs,  # ffn_nb
@@ -298,7 +301,7 @@ class LSTransformerEncoderLayer(nn.Module):
             hidden_states,
             encoder_padding_mask,
             self.para,
-            self.config,
+            self.config
         )
 
         return output.to(self.para)

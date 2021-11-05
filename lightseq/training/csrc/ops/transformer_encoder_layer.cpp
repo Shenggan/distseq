@@ -1,4 +1,8 @@
 #include "transformer_encoder_layer.h"
+#include <iostream>
+
+#include <c10d/Types.hpp>
+#include <torch/extension.h>
 
 #include "context.h"
 #include "kernels.h"
@@ -44,7 +48,6 @@ TransformerEncoderLayer<T>::TransformerEncoderLayer(
       _attn_context(typename StridedBatchGemm<T>::Config(
           T(1.0), T(0.0), CUBLAS_OP_N, CUBLAS_OP_N)) {
   assert(_hidden_size % _heads == 0);
-  allocate_mem_buffer();
 }
 
 template <typename T>
@@ -113,15 +116,28 @@ void TransformerEncoderLayer<T>::ffn_layer_fw(T *inp_ptr, T *out_ptr) {
     _ffn_ln.Forward(_ff1_inp_ptr, inp_ptr, _ffn_nw_ptr, _ffn_nb_ptr,
                     _batch_tokens, _stream);
   }
-  _ff1.Forward(_batch_tokens, _ff1_inp_ptr, _inter_w_ptr, _relu_inp_ptr,
-               _cublasHandle);
+  _ff1.Forward_dist(_batch_tokens, _ff1_inp_ptr, _inter_w_ptr, _relu_inp_ptr,
+               _cublasHandle, pg->getSize());
 
   _ffn_activation_dropout.bias_act_dropout(
       _ff2_inp_ptr, _relu_inp_ptr, _inter_b_ptr, _batch_tokens,
-      _intermediate_size, _activation_fn, _stream);
+      _intermediate_size / pg->getSize(), _activation_fn, _stream);
 
-  _ff2.Forward(_batch_tokens, _ff2_inp_ptr, _output_w_ptr, out_ptr,
-               _cublasHandle);
+  _ff2.Forward_merge(_batch_tokens, _ff2_inp_ptr, _output_w_ptr, out_ptr,
+               _cublasHandle, pg->getSize());
+
+  // allreduce
+  if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
+  } else {
+    auto output_tensor = torch::from_blob(
+        out_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)}, torch::kCUDA);
+    if (typeid(T) != typeid(float)) {
+      output_tensor = output_tensor.to(torch::kHalf);
+    }
+    std::vector<torch::Tensor> allreduce_tensors = {output_tensor};
+    // output_tensor.print();
+    auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
+  }
 
   _ffn_dropout.bias_dropout_residual(out_ptr, out_ptr, inp_ptr, _output_b_ptr,
                                      _batch_tokens, _hidden_size, _stream);
@@ -144,7 +160,6 @@ void TransformerEncoderLayer<T>::Forward(const T *input_ptr,
       _pre_or_postLayerNorm ? _shared_mem_ptr + 3 * _batch_dim : _ff1_inp_ptr;
 
   attn_layer_fw(input_ptr, input_mask_ptr, ffn_inp_ptr, attn_buffer);
-
   ffn_layer_fw(ffn_inp_ptr, out_ptr);
 }
 
@@ -258,17 +273,35 @@ void TransformerEncoderLayer<T>::ffn_layer_bw(const T *grad_output_ptr,
                                          _hidden_size, _stream);
   }
 
-  _ff2.Backward(_batch_tokens, grad_inp_ptr, _ff2_inp_ptr, _output_w_ptr,
+  _ff2.Backward_dist(_batch_tokens, grad_inp_ptr, _ff2_inp_ptr, _output_w_ptr,
                 _grad_output_w_ptr, _grad_output_b_ptr, _cublasHandle, _stream,
-                grad_ff1_out_ptr, nullptr, false);
+                grad_ff1_out_ptr, nullptr, false, pg->getSize());
 
   _ffn_activation_dropout.d_bias_act_dropout(
       grad_ff1_out_ptr, _grad_inter_b_ptr, _relu_inp_ptr, _inter_b_ptr,
-      _batch_tokens, _intermediate_size, _activation_fn, _stream);
+      _batch_tokens, _intermediate_size / pg->getSize(), _activation_fn, _stream);
 
-  _ff1.Backward(_batch_tokens, grad_ff1_out_ptr, _ff1_inp_ptr, _inter_w_ptr,
+  // grad_ff1_out_ptr:  _batch_size * _seq_len * _intermediate_size
+  // _ff1_inp_ptr: _batch_size * _seq_len * _hidden_size
+  // _inter_w_ptr/_grad_inter_w_ptr:  _hidden_size * _intermediate_size / pg->getSize()
+  // _grad_inter_b_ptr: _intermediate_size / pg->getSize();
+  // grad_ff1_inp_ptr: _batch_dim
+  _ff1.Backward_merge(_batch_tokens, grad_ff1_out_ptr, _ff1_inp_ptr, _inter_w_ptr,
                 _grad_inter_w_ptr, _grad_inter_b_ptr, _cublasHandle, _stream,
-                grad_ff1_inp_ptr, nullptr, false);
+                grad_ff1_inp_ptr, nullptr, false, pg->getSize());
+
+  // allreduce
+  if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
+  } else {
+    auto grad_ff1_tensor = torch::from_blob(
+        grad_ff1_inp_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)}, torch::kCUDA);
+    if (typeid(T) != typeid(float)) {
+      grad_ff1_tensor = grad_ff1_tensor.to(torch::kHalf);
+    }
+    std::vector<torch::Tensor> allreduce_tensors = {grad_ff1_tensor};
+    auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
+    work->wait();
+  }
 
   /* ln signature:
   grad_gamma_grad, grad_betta, grad_inp,

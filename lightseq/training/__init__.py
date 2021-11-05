@@ -2,7 +2,7 @@ from lightseq.training.ops.pytorch.transformer_embedding_layer import (
     LSTransformerEmbeddingLayer,
 )
 from lightseq.training.ops.pytorch.transformer_encoder_layer import (
-    LSTransformerEncoderLayer,
+    LSTransformerEncoderLayer, LSTransformerEncoderFunc
 )
 from lightseq.training.ops.pytorch.transformer_decoder_layer import (
     LSTransformerDecoderLayer,

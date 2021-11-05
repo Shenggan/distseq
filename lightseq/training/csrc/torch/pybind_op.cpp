@@ -1,5 +1,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
+#include <c10/util/intrusive_ptr.h>
+#include <c10d/ProcessGroup.hpp>
+
 #include <string>
 
 #include "context.h"
@@ -25,13 +28,15 @@ int create_transformer_encoder_layer(
     int layer_id, int max_batch_tokens, int max_seq_len, int hidden_dim,
     int num_heads, int intermediate_size, float attn_prob_dropout_ratio,
     float activation_dropout_ratio, float hidden_dropout_ratio,
-    bool pre_or_postLayerNorm, std::string activation_fn) {
+    bool pre_or_postLayerNorm, std::string activation_fn, c10::intrusive_ptr<c10d::ProcessGroup> pg_) {
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   Context::Instance().set_stream(stream);
   auto layer = std::make_shared<TransformerEncoderLayer<T>>(
       layer_id, max_batch_tokens, max_seq_len, hidden_dim, num_heads,
       intermediate_size, attn_prob_dropout_ratio, activation_dropout_ratio,
       hidden_dropout_ratio, pre_or_postLayerNorm, activation_fn);
+
+  layer->SetPG(pg_);
 
   s_transformer_encoder_layers[layer_id] = layer;
 
