@@ -11,7 +11,7 @@ import setuptools
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 
-from lightseq import __version__
+from distseq import __version__
 
 logging.basicConfig()
 logger = logging.getLogger(__file__)
@@ -54,7 +54,7 @@ class CMakeBuild(build_ext):
 
         cmake_args = [
             # fixed for lightseq.inference
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + os.path.join(extdir, "lightseq"),
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + os.path.join(extdir, "distseq"),
             "-DPYTHON_EXECUTABLE=" + sys.executable,
         ]
 
@@ -72,7 +72,7 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
             cmake_args += ["-DFP16_MODE=OFF"] if ENABLE_FP32 else ["-DFP16_MODE=ON"]
             cmake_args += ["-DDEBUG_MODE=ON"] if ENABLE_DEBUG else ["-DDEBUG_MODE=OFF"]
-            build_args += ["--target", "lightseq"]
+            build_args += ["--target", "distseq"]
             build_args += ["--", "-j{}".format(multiprocessing.cpu_count())]
 
         env = os.environ.copy()
@@ -94,7 +94,7 @@ with open("README.md", "r") as fh:
 
 
 setup_kwargs = dict(
-    name="lightseq",
+    name="distseq",
     version=__version__,
     author="Xiaohui Wang, Ying Xiong, Xian Qian, Yang Wei",
     author_email=(
@@ -129,7 +129,7 @@ setup_kwargs = dict(
         ],
     },
 )
-ext_modules = [CMakeExtension("inference")]
+ext_modules = []
 
 try:
     setup(ext_modules=ext_modules, **setup_kwargs)

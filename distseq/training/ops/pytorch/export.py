@@ -1,7 +1,7 @@
 from collections import OrderedDict
 import numpy as np
-from lightseq.training.ops.pytorch.util import get_pos_embedding
-from lightseq.training import LSTransformerEncoderLayer, LSTransformerDecoderLayer
+from distseq.training.ops.pytorch.util import get_pos_embedding
+from distseq.training import LSTransformerEncoderLayer, LSTransformerDecoderLayer
 
 
 def gather_token_embedding(tensor_names, state_dict, tn_pattern, scale=True):

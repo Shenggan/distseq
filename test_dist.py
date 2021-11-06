@@ -10,7 +10,7 @@ random.seed(2048)
 import numpy as np
 np.random.seed(2048)
 
-from lightseq.training import LSTransformerEncoderLayer, LSTransformerEncoderFunc
+from distseq.training import LSTransformerEncoderLayer
 
 local_rank = int(os.environ.get("LOCAL_RANK", -1))
 

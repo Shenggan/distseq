@@ -3,12 +3,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from lightseq.training import (
+from distseq.training import (
     LSTransformerEmbeddingLayer,
     LSTransformerEncoderLayer,
     LSTransformerDecoderLayer,
 )
-from lightseq.training.ops.pytorch.util import MODEL_ARCH
+from distseq.training.ops.pytorch.util import MODEL_ARCH
 
 
 class LSTransformer(nn.Module):

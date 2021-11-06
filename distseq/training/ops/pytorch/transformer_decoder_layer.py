@@ -5,8 +5,8 @@ import torch
 from torch import nn
 from torch.autograd import Function
 
-from lightseq.training.ops.pytorch.builder import TransformerBuilder
-from lightseq.training.ops.pytorch.util import (
+from distseq.training.ops.pytorch.builder import TransformerBuilder
+from distseq.training.ops.pytorch.util import (
     copy_para,
     state_dict,
     MODEL_ARCH,
