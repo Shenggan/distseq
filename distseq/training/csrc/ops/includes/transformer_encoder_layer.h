@@ -50,7 +50,7 @@ class TransformerEncoderLayer {
     _batch_size = batch_size;
     _seq_len = seq_len;
     _batch_tokens = batch_size * seq_len;
-    _batch_heads = batch_size * _heads;
+    _batch_heads = batch_size * _heads / pg->getSize();
     _batch_dim = _batch_tokens * _hidden_size;
     _attn_scores.SetConfig(_seq_len, _seq_len, _hidden_size / _heads);
     _attn_context.SetConfig(_hidden_size / _heads, _seq_len, _seq_len);
@@ -63,11 +63,11 @@ class TransformerEncoderLayer {
     const T *wptr = weights_ptr;
     // assign weights ptr
     _attn_qkvw_ptr = wptr;
-    wptr += _hidden_size * _hidden_size * 3;
+    wptr += _hidden_size * _hidden_size * 3 / pg->getSize();
     _attn_qkvb_ptr = wptr;
-    wptr += _hidden_size * 3;
+    wptr += _hidden_size * 3 / pg->getSize();
     _attn_ow_ptr = wptr;
-    wptr += _hidden_size * _hidden_size;
+    wptr += _hidden_size * _hidden_size / pg->getSize();
     _attn_ob_ptr = wptr;
     wptr += _hidden_size;
     _attn_nw_ptr = wptr;
@@ -93,11 +93,11 @@ class TransformerEncoderLayer {
     T *gptr = grads_ptr;
     // assign grads ptr
     _grad_attn_qkvw_ptr = gptr;
-    gptr += _hidden_size * _hidden_size * 3;
+    gptr += _hidden_size * _hidden_size * 3 / pg->getSize();
     _grad_attn_qkvb_ptr = gptr;
-    gptr += _hidden_size * 3;
+    gptr += _hidden_size * 3 / pg->getSize();
     _grad_attn_ow_ptr = gptr;
-    gptr += _hidden_size * _hidden_size;
+    gptr += _hidden_size * _hidden_size / pg->getSize();
     _grad_attn_ob_ptr = gptr;
     gptr += _hidden_size;
     _grad_attn_nw_ptr = gptr;
@@ -132,13 +132,15 @@ class TransformerEncoderLayer {
     } else {
       _gemmQKV_inp_ptr = nullptr;
     }
+
+    int pg_size = pg->getSize();
     _qkv_ptr = cuda_malloc<T>(_max_batch_tokens * _hidden_size * 3);
-    _soft_out_ptr = cuda_malloc<T>(_max_batch_tokens * _heads * _max_seq_len);
-    _ctx_bufB_ptr = cuda_malloc<T>(_max_batch_tokens * _heads * _max_seq_len);
+    _soft_out_ptr = cuda_malloc<T>(_max_batch_tokens * _heads / pg_size * _max_seq_len);
+    _ctx_bufB_ptr = cuda_malloc<T>(_max_batch_tokens * _heads / pg_size * _max_seq_len);
     _attn_o_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _hidden_size);
     _ff1_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _hidden_size);
-    _relu_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg->getSize());
-    _ff2_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg->getSize());
+    _relu_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg_size);
+    _ff2_inp_ptr = cuda_malloc<T>(_max_batch_tokens * _intermediate_size / pg_size);
 
     // buffer size needed by ffn bw
     size_t sz_ffn_bw = 3 * _max_batch_tokens * _hidden_size +

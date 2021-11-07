@@ -192,9 +192,9 @@ class LSTransformerEncoderLayer(nn.Module):
     def gen_offset(hidden_size, intermediate_size, pg_size):
         hs, ims = hidden_size, intermediate_size
         sizes = [
-            hs * hs * 3,  # attn_qkvw
-            hs * 3,  # attn_qkvb
-            hs * hs,  # attn_ow
+            int(hs * hs * 3 / pg_size),  # attn_qkvw
+            int(hs * 3 / pg_size),  # attn_qkvb
+            int(hs * hs / pg_size),  # attn_ow
             hs,  # attn_ob
             hs,  # attn_nw
             hs,  # attn_nb
@@ -221,29 +221,114 @@ class LSTransformerEncoderLayer(nn.Module):
     def init_transformer_weights(self):
         hs = self.config.hidden_size
         ims = self.config.intermediate_size
-        attn_qkvw = self._get_weights(0).view(-1, hs)
-        nn.init.xavier_uniform_(attn_qkvw, 1.0 / math.sqrt(2.0))
-        bound = self.calc_bound(attn_qkvw)
-        nn.init.uniform_(self._get_weights(1), -bound, bound)
 
-        nn.init.xavier_uniform_(self._get_weights(2).view(-1, hs), 1.0)
         nn.init.zeros_(self._get_weights(3))
 
         nn.init.ones_(self._get_weights(4))
         nn.init.zeros_(self._get_weights(5))
 
-        inter_w = self._get_weights(6).view(ims, hs)
-        nn.init.kaiming_uniform_(inter_w, math.sqrt(5.0))
-        bound = self.calc_bound(inter_w)
-        nn.init.uniform_(self._get_weights(7), -bound, bound)
+        if self.pg_size > 1:
+            attn_qkvw_global = torch.empty(hs * 3, hs)
+            attn_qkvb_global = torch.empty(hs * 3)
+            nn.init.xavier_uniform_(attn_qkvw_global, 1.0 / math.sqrt(2.0))
+            bound = self.calc_bound(attn_qkvw_global)
+            nn.init.uniform_(attn_qkvb_global, -bound, bound)
 
-        output_w = self._get_weights(8).view(hs, ims)
-        nn.init.kaiming_uniform_(output_w, math.sqrt(5.0))
-        bound = self.calc_bound(output_w)
-        nn.init.uniform_(self._get_weights(9), -bound, bound)
+            attn_qkvw_global = attn_qkvw_global.cuda()
+            attn_qkvb_global = attn_qkvb_global.cuda()
+            torch.distributed.broadcast(attn_qkvw_global, src=0)
+            torch.distributed.broadcast(attn_qkvb_global, src=0)
+            attn_qkvw_global = attn_qkvw_global.cpu()
+            attn_qkvb_global = attn_qkvb_global.cpu()
+
+            attn_qkvw = self._get_weights(0).view(3, int(hs / self.pg_size), hs)
+            attn_qkvb = self._get_weights(1).view(3, int(hs / self.pg_size))
+
+            attn_qkvw.copy_(
+                attn_qkvw_global.view(3, hs, hs)[:, int(hs * self.config.local_rank /
+                                     self.pg_size):int(hs * (self.config.local_rank + 1) /
+                                                       self.pg_size), :])
+            attn_qkvb.copy_(
+                attn_qkvb_global.view(3, hs)[:, int(hs * self.config.local_rank /
+                                     self.pg_size):int(hs * (self.config.local_rank + 1) /
+                                                       self.pg_size)])
+
+            attn_ow_global = torch.empty(hs, hs)
+            nn.init.xavier_uniform_(attn_ow_global, 1.0)
+            attn_ow_global = attn_ow_global.cuda()
+            torch.distributed.broadcast(attn_ow_global, src=0)
+            attn_ow_global = attn_ow_global.cpu()
+            attn_ow = self._get_weights(2).view(-1, int(hs / self.pg_size))
+            attn_ow.copy_(attn_ow_global[:, int(hs * self.config.local_rank /
+                                     self.pg_size):int(hs * (self.config.local_rank + 1) /
+                                                       self.pg_size)])
+
+            inter_w_global = torch.empty(ims, hs)
+            inter_b_global = torch.empty(ims)
+            nn.init.kaiming_uniform_(inter_w_global, math.sqrt(5.0))
+            bound = self.calc_bound(inter_w_global)
+            nn.init.uniform_(inter_b_global, -bound, bound)
+
+            inter_w_global = inter_w_global.cuda()
+            inter_b_global = inter_b_global.cuda()
+
+            torch.distributed.broadcast(inter_w_global, src=0)
+            torch.distributed.broadcast(inter_b_global, src=0)
+
+            inter_w_global = inter_w_global.cpu()
+            inter_b_global = inter_b_global.cpu()
+
+            inter_w = self._get_weights(6).view(int(ims / self.pg_size), hs)
+            inter_b = self._get_weights(7)
+
+            inter_w.copy_(inter_w_global[int(ims * (self.config.local_rank) /
+                                             self.pg_size):int(ims * (self.config.local_rank + 1) /
+                                                               self.pg_size), :])
+            inter_b.copy_(inter_b_global[int(ims * (self.config.local_rank) /
+                                             self.pg_size):int(ims * (self.config.local_rank + 1) /
+                                                               self.pg_size)])
+
+            output_w_global = torch.empty(hs, ims)
+            output_b_global = torch.empty(hs)
+            nn.init.kaiming_uniform_(output_w_global, math.sqrt(5.0))
+            bound = self.calc_bound(output_w_global)
+            nn.init.uniform_(output_b_global, -bound, bound)
+
+            output_w_global = output_w_global.cuda()
+            output_b_global = output_b_global.cuda()
+
+            torch.distributed.broadcast(output_w_global, src=0)
+            torch.distributed.broadcast(output_b_global, src=0)
+
+            output_w_global = output_w_global.cpu()
+            output_b_global = output_b_global.cpu()
+
+            output_w = self._get_weights(8).view(hs, int(ims / self.pg_size))
+            output_b = self._get_weights(9)
+
+            output_w.copy_(output_w_global[:, int(ims * (self.config.local_rank) / self.pg_size): int(ims * (self.config.local_rank + 1) / self.pg_size)])
+            output_b.copy_(output_b_global)
+        else:
+            attn_qkvw = self._get_weights(0).view(-1, hs)
+            nn.init.xavier_uniform_(attn_qkvw, 1.0 / math.sqrt(2.0))
+            bound = self.calc_bound(attn_qkvw)
+            nn.init.uniform_(self._get_weights(1), -bound, bound)
+
+            nn.init.xavier_uniform_(self._get_weights(2).view(-1, hs), 1.0)
+
+            inter_w = self._get_weights(6).view(int(ims / self.pg_size), hs)
+            nn.init.kaiming_uniform_(inter_w, math.sqrt(5.0))
+            bound = self.calc_bound(inter_w)
+            nn.init.uniform_(self._get_weights(7), -bound, bound)
+
+            output_w = self._get_weights(8).view(hs, int(ims / self.pg_size))
+            nn.init.kaiming_uniform_(output_w, math.sqrt(5.0))
+            bound = self.calc_bound(output_w)
+            nn.init.uniform_(self._get_weights(9), -bound, bound)
 
         nn.init.ones_(self._get_weights(10))
         nn.init.zeros_(self._get_weights(11))
+
 
     def __assign_layer_weight_grad(self):
         param = (

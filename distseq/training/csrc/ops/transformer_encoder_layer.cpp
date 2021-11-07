@@ -63,17 +63,18 @@ void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
   T *k_tf_ptr = q_tf_ptr + _batch_dim;
   T *v_tf_ptr = k_tf_ptr + _batch_dim;
 
+  int pg_size = pg->getSize();
+
   if (_pre_or_postLayerNorm) {
     _attn_ln.Forward(_gemmQKV_inp_ptr, input_ptr, _attn_nw_ptr, _attn_nb_ptr,
                      _batch_tokens, _stream);
   }
-  const T *gemmQKV_inp_ptr =
-      _pre_or_postLayerNorm ? _gemmQKV_inp_ptr : input_ptr;
-  _qkv_linear.Forward(_batch_tokens, gemmQKV_inp_ptr, _attn_qkvw_ptr, buffer,
-                      _cublasHandle);
+  const T *gemmQKV_inp_ptr = _pre_or_postLayerNorm ? _gemmQKV_inp_ptr : input_ptr;
+  _qkv_linear.reset_size(3 * _hidden_size / pg_size, _hidden_size);
+  _qkv_linear.Forward(_batch_tokens, gemmQKV_inp_ptr, _attn_qkvw_ptr, buffer, _cublasHandle);
 
   launch_bias_add_transform_20314<T>(q_tf_ptr, buffer, _attn_qkvb_ptr,
-                                     _batch_size, _seq_len, 3, _heads,
+                                     _batch_size, _seq_len, 3, _heads / pg_size,
                                      _hidden_size / _heads, _stream);
 
   // attention scores, q*k
@@ -81,8 +82,8 @@ void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
                        _cublasHandle);
 
   // Softmax + Mask
-  _softmax.Forward(_soft_out_ptr, input_mask_ptr, _batch_size, _seq_len,
-                   _seq_len, _stream);
+  _softmax.reset_size(_heads / pg_size);
+  _softmax.Forward(_soft_out_ptr, input_mask_ptr, _batch_size, _seq_len, _seq_len, _stream, true);
 
   // attn prob dropout.
   _attn_prob_dropout.dropout(_ctx_bufB_ptr, _soft_out_ptr,
@@ -94,10 +95,27 @@ void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
 
   // [b, nh, s, ad] -> [b, s, nh, ad]
   launch_transform4d_0213<T>(_attn_o_inp_ptr, buffer, _batch_size, _seq_len,
-                             _hidden_size, _heads, 1, _stream);
+                             _hidden_size, _heads / pg_size, 1, _stream);
 
+  _attn_out_linear.reset_size(_hidden_size, _hidden_size / pg_size);
   _attn_out_linear.Forward(_batch_tokens, _attn_o_inp_ptr, _attn_ow_ptr,
                            output_ptr, _cublasHandle);
+
+  // allreduce
+  if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
+  } else {
+    auto data_type = torch::kFloat;
+    if (typeid(T) != typeid(float)) {
+      data_type = torch::kHalf;
+    }
+    auto output_tensor =
+        torch::from_blob(output_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
+                         torch::TensorOptions(torch::kCUDA).dtype(data_type));
+    std::vector<torch::Tensor> allreduce_tensors = {output_tensor};
+    // output_tensor.print();
+    auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
+    work->wait();
+  }
 
   _attn_dropout.bias_dropout_residual(output_ptr, output_ptr, input_ptr,
                                       _attn_ob_ptr, _batch_tokens, _hidden_size,
@@ -116,27 +134,30 @@ void TransformerEncoderLayer<T>::ffn_layer_fw(T *inp_ptr, T *out_ptr) {
     _ffn_ln.Forward(_ff1_inp_ptr, inp_ptr, _ffn_nw_ptr, _ffn_nb_ptr,
                     _batch_tokens, _stream);
   }
-  _ff1.Forward_dist(_batch_tokens, _ff1_inp_ptr, _inter_w_ptr, _relu_inp_ptr,
-               _cublasHandle, pg->getSize());
+  _ff1.reset_size(_intermediate_size / pg->getSize(), _hidden_size);
+  _ff1.Forward(_batch_tokens, _ff1_inp_ptr, _inter_w_ptr, _relu_inp_ptr, _cublasHandle);
 
   _ffn_activation_dropout.bias_act_dropout(
       _ff2_inp_ptr, _relu_inp_ptr, _inter_b_ptr, _batch_tokens,
       _intermediate_size / pg->getSize(), _activation_fn, _stream);
 
-  _ff2.Forward_merge(_batch_tokens, _ff2_inp_ptr, _output_w_ptr, out_ptr,
-               _cublasHandle, pg->getSize());
+  _ff2.reset_size(_hidden_size, _intermediate_size / pg->getSize());
+  _ff2.Forward(_batch_tokens, _ff2_inp_ptr, _output_w_ptr, out_ptr, _cublasHandle);
 
   // allreduce
   if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
   } else {
-    auto output_tensor = torch::from_blob(
-        out_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)}, torch::kCUDA);
+    auto data_type = torch::kFloat;
     if (typeid(T) != typeid(float)) {
-      output_tensor = output_tensor.to(torch::kHalf);
+      data_type = torch::kHalf;
     }
+    auto output_tensor =
+        torch::from_blob(out_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
+                         torch::TensorOptions(torch::kCUDA).dtype(data_type));
     std::vector<torch::Tensor> allreduce_tensors = {output_tensor};
     // output_tensor.print();
     auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
+    work->wait();
   }
 
   _ffn_dropout.bias_dropout_residual(out_ptr, out_ptr, inp_ptr, _output_b_ptr,
@@ -169,6 +190,8 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
                                                const T *grad_output_ptr,
                                                T *grad_input_ptr, T *buffer) {
   cudaStream_t streams[2] = {_stream, _stream};
+  int pg_size = pg->getSize();
+
   const T *q_tf_ptr = _qkv_ptr;
   const T *k_tf_ptr = q_tf_ptr + _batch_dim;
   const T *v_tf_ptr = k_tf_ptr + _batch_dim;
@@ -201,12 +224,12 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
   }
 
   // bw of output project
-  _attn_out_linear.Backward(_batch_tokens, grad_input_ptr, _attn_o_inp_ptr,
-                            _attn_ow_ptr, _grad_attn_ow_ptr, _grad_attn_ob_ptr,
-                            _cublasHandle, _stream, grad_input_buf_ptr, nullptr,
-                            false);
+  _attn_out_linear.reset_size(_hidden_size, _hidden_size / pg_size);
+  _attn_out_linear.Backward(_batch_tokens, grad_input_ptr, _attn_o_inp_ptr, _attn_ow_ptr,
+                            _grad_attn_ow_ptr, _grad_attn_ob_ptr, _cublasHandle, _stream,
+                            grad_input_buf_ptr, nullptr, false);
   launch_transform_0213<T>(grad_input_ptr, grad_input_buf_ptr, _batch_size,
-                           _seq_len, _hidden_size, _heads, _stream);
+                           _seq_len, _hidden_size, _heads / pg_size, _stream);
 
   // bw of score * v
   _attn_context.Backward(_batch_heads, grad_input_ptr, v_tf_ptr, _ctx_bufB_ptr,
@@ -216,8 +239,8 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
   _attn_prob_dropout.d_dropout(grad_softmax_ptr,
                                _batch_heads * _seq_len * _seq_len, _stream);
 
-  _softmax.Backward(grad_softmax_ptr, _soft_out_ptr, _batch_size, _seq_len,
-                    _seq_len, _stream);
+  _softmax.reset_size(_heads / pg_size);
+  _softmax.Backward(grad_softmax_ptr, _soft_out_ptr, _batch_size, _seq_len, _seq_len, _stream);
 
   // bw of q * k
   _attn_scores.Backward(_batch_heads, grad_softmax_ptr, k_tf_ptr, q_tf_ptr,
@@ -226,13 +249,30 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
 
   // [3, b, nh, s, ad] -> [b, s, 3, h]
   launch_transform4d_0213<T>(grad_qkv_4d_ptr, grad_qkv_5d_ptr, _batch_size,
-                             _seq_len, _hidden_size, _heads, 3, _stream);
+                             _seq_len, _hidden_size, _heads / pg_size, 3, _stream);
 
   const T *gemmQKV_inp_ptr =
       _pre_or_postLayerNorm ? _gemmQKV_inp_ptr : input_ptr;
+  _qkv_linear.reset_size(3 * _hidden_size / pg_size, _hidden_size);
   _qkv_linear.Backward(_batch_tokens, grad_qkv_4d_ptr, gemmQKV_inp_ptr,
                        _attn_qkvw_ptr, _grad_attn_qkvw_ptr, _grad_attn_qkvb_ptr,
-                       _cublasHandle, _stream, grad_input_buf_ptr);
+                       _cublasHandle, _stream, grad_input_buf_ptr, nullptr, true);
+
+  // allreduce
+  if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
+  } else {
+    auto data_type = torch::kFloat;
+    if (typeid(T) != typeid(float)) {
+      data_type = torch::kHalf;
+    }
+    auto grad_input_tensor =
+        torch::from_blob(grad_input_buf_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
+                         torch::TensorOptions(torch::kCUDA).dtype(data_type));
+    std::vector<torch::Tensor> allreduce_tensors = {grad_input_tensor};
+    // output_tensor.print();
+    auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
+    work->wait();
+  }
 
   if (_pre_or_postLayerNorm) {
     _attn_ln.Backward(_grad_attn_nw_ptr, _grad_attn_nb_ptr, grad_input_ptr,
@@ -273,9 +313,10 @@ void TransformerEncoderLayer<T>::ffn_layer_bw(const T *grad_output_ptr,
                                          _hidden_size, _stream);
   }
 
-  _ff2.Backward_dist(_batch_tokens, grad_inp_ptr, _ff2_inp_ptr, _output_w_ptr,
+  _ff2.reset_size(_hidden_size, _intermediate_size / pg->getSize());
+  _ff2.Backward(_batch_tokens, grad_inp_ptr, _ff2_inp_ptr, _output_w_ptr,
                 _grad_output_w_ptr, _grad_output_b_ptr, _cublasHandle, _stream,
-                grad_ff1_out_ptr, nullptr, false, pg->getSize());
+                grad_ff1_out_ptr, nullptr, false);
 
   _ffn_activation_dropout.d_bias_act_dropout(
       grad_ff1_out_ptr, _grad_inter_b_ptr, _relu_inp_ptr, _inter_b_ptr,
@@ -286,15 +327,21 @@ void TransformerEncoderLayer<T>::ffn_layer_bw(const T *grad_output_ptr,
   // _inter_w_ptr/_grad_inter_w_ptr:  _hidden_size * _intermediate_size / pg->getSize()
   // _grad_inter_b_ptr: _intermediate_size / pg->getSize();
   // grad_ff1_inp_ptr: _batch_dim
-  _ff1.Backward_merge(_batch_tokens, grad_ff1_out_ptr, _ff1_inp_ptr, _inter_w_ptr,
+  _ff1.reset_size(_intermediate_size / pg->getSize(), _hidden_size);
+  _ff1.Backward(_batch_tokens, grad_ff1_out_ptr, _ff1_inp_ptr, _inter_w_ptr,
                 _grad_inter_w_ptr, _grad_inter_b_ptr, _cublasHandle, _stream,
-                grad_ff1_inp_ptr, nullptr, false, pg->getSize());
+                grad_ff1_inp_ptr, nullptr, false);
 
   // allreduce
   if (pg == c10::detail::UniqueVoidPtr() || pg->getSize() == 1) {
   } else {
-    auto grad_ff1_tensor = torch::from_blob(
-        grad_ff1_inp_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)}, torch::kCUDA);
+    auto data_type = torch::kFloat;
+    if (typeid(T) != typeid(float)) {
+      data_type = torch::kHalf;
+    }
+    auto grad_ff1_tensor =
+        torch::from_blob(grad_ff1_inp_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
+                         torch::TensorOptions(torch::kCUDA).dtype(data_type));
     if (typeid(T) != typeid(float)) {
       grad_ff1_tensor = grad_ff1_tensor.to(torch::kHalf);
     }

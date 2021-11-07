@@ -35,6 +35,10 @@ class Softmax {
                               stream);
   }
 
+  void reset_size(size_t nhead) {
+    config_.nhead = nhead;
+  }
+
  private:
   Config config_;
 };
