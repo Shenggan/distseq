@@ -59,11 +59,11 @@ template <typename T>
 void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
                                                const T *input_mask_ptr,
                                                T *output_ptr, T *buffer) {
-  T *q_tf_ptr = _qkv_ptr;
-  T *k_tf_ptr = q_tf_ptr + _batch_dim;
-  T *v_tf_ptr = k_tf_ptr + _batch_dim;
-
   int pg_size = pg->getSize();
+  
+  T *q_tf_ptr = _qkv_ptr;
+  T *k_tf_ptr = q_tf_ptr + _batch_dim / pg_size;
+  T *v_tf_ptr = k_tf_ptr + _batch_dim / pg_size;
 
   if (_pre_or_postLayerNorm) {
     _attn_ln.Forward(_gemmQKV_inp_ptr, input_ptr, _attn_nw_ptr, _attn_nb_ptr,
@@ -193,8 +193,8 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
   int pg_size = pg->getSize();
 
   const T *q_tf_ptr = _qkv_ptr;
-  const T *k_tf_ptr = q_tf_ptr + _batch_dim;
-  const T *v_tf_ptr = k_tf_ptr + _batch_dim;
+  const T *k_tf_ptr = q_tf_ptr + _batch_dim / pg_size;
+  const T *v_tf_ptr = k_tf_ptr + _batch_dim / pg_size;
   // batch_dim = batch_size * seq_len * hidden_size
   // buffer size: batch_dim * 3 + max(batch_dim * 3,
   //     batch_size * head_num * seq_len * seq_len)
@@ -203,7 +203,7 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
 
   T *grad_input_buf_ptr = buffer;  // batch_dim
   T *grad_qkv_5d_ptr = buffer;     // batch_dim * 3
-  buffer += 3 * _batch_dim;
+  buffer += 3 * _batch_dim / pg_size;
 
   T *grad_qkv_4d_ptr = buffer;   // batch_dim * 3
   T *grad_softmax_ptr = buffer;  // batch_size * head_num * seq_len * seq_len
@@ -233,7 +233,7 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
 
   // bw of score * v
   _attn_context.Backward(_batch_heads, grad_input_ptr, v_tf_ptr, _ctx_bufB_ptr,
-                         _cublasHandle, grad_qkv_5d_ptr + 2 * _batch_dim,
+                         _cublasHandle, grad_qkv_5d_ptr + 2 * _batch_dim / pg_size,
                          grad_softmax_ptr);
 
   _attn_prob_dropout.d_dropout(grad_softmax_ptr,
@@ -244,7 +244,7 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
 
   // bw of q * k
   _attn_scores.Backward(_batch_heads, grad_softmax_ptr, k_tf_ptr, q_tf_ptr,
-                        _cublasHandle, grad_qkv_5d_ptr + _batch_dim,
+                        _cublasHandle, grad_qkv_5d_ptr + _batch_dim / pg_size,
                         grad_qkv_5d_ptr);
 
   // [3, b, nh, s, ad] -> [b, s, 3, h]
