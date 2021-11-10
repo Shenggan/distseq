@@ -95,7 +95,7 @@ void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
 
   // [b, nh, s, ad] -> [b, s, nh, ad]
   launch_transform4d_0213<T>(_attn_o_inp_ptr, buffer, _batch_size, _seq_len,
-                             _hidden_size, _heads / pg_size, 1, _stream);
+                             _hidden_size / pg_size, _heads / pg_size, 1, _stream);
 
   _attn_out_linear.reset_size(_hidden_size, _hidden_size / pg_size);
   _attn_out_linear.Forward(_batch_tokens, _attn_o_inp_ptr, _attn_ow_ptr,
@@ -112,7 +112,6 @@ void TransformerEncoderLayer<T>::attn_layer_fw(const T *input_ptr,
         torch::from_blob(output_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
                          torch::TensorOptions(torch::kCUDA).dtype(data_type));
     std::vector<torch::Tensor> allreduce_tensors = {output_tensor};
-    // output_tensor.print();
     auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
     work->wait();
   }
@@ -155,7 +154,6 @@ void TransformerEncoderLayer<T>::ffn_layer_fw(T *inp_ptr, T *out_ptr) {
         torch::from_blob(out_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
                          torch::TensorOptions(torch::kCUDA).dtype(data_type));
     std::vector<torch::Tensor> allreduce_tensors = {output_tensor};
-    // output_tensor.print();
     auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
     work->wait();
   }
@@ -229,7 +227,7 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
                             _grad_attn_ow_ptr, _grad_attn_ob_ptr, _cublasHandle, _stream,
                             grad_input_buf_ptr, nullptr, false);
   launch_transform_0213<T>(grad_input_ptr, grad_input_buf_ptr, _batch_size,
-                           _seq_len, _hidden_size, _heads / pg_size, _stream);
+                           _seq_len, _hidden_size / pg_size, _heads / pg_size, _stream);
 
   // bw of score * v
   _attn_context.Backward(_batch_heads, grad_input_ptr, v_tf_ptr, _ctx_bufB_ptr,
@@ -249,7 +247,7 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
 
   // [3, b, nh, s, ad] -> [b, s, 3, h]
   launch_transform4d_0213<T>(grad_qkv_4d_ptr, grad_qkv_5d_ptr, _batch_size,
-                             _seq_len, _hidden_size, _heads / pg_size, 3, _stream);
+                             _seq_len, _hidden_size / pg_size, _heads / pg_size, 3, _stream);
 
   const T *gemmQKV_inp_ptr =
       _pre_or_postLayerNorm ? _gemmQKV_inp_ptr : input_ptr;
@@ -269,7 +267,6 @@ void TransformerEncoderLayer<T>::attn_layer_bw(const T *input_ptr,
         torch::from_blob(grad_input_buf_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
                          torch::TensorOptions(torch::kCUDA).dtype(data_type));
     std::vector<torch::Tensor> allreduce_tensors = {grad_input_tensor};
-    // output_tensor.print();
     auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
     work->wait();
   }
@@ -342,9 +339,6 @@ void TransformerEncoderLayer<T>::ffn_layer_bw(const T *grad_output_ptr,
     auto grad_ff1_tensor =
         torch::from_blob(grad_ff1_inp_ptr, {int(_batch_size), int(_seq_len), int(_hidden_size)},
                          torch::TensorOptions(torch::kCUDA).dtype(data_type));
-    if (typeid(T) != typeid(float)) {
-      grad_ff1_tensor = grad_ff1_tensor.to(torch::kHalf);
-    }
     std::vector<torch::Tensor> allreduce_tensors = {grad_ff1_tensor};
     auto work = pg->allreduce(allreduce_tensors, c10d::AllreduceOptions());
     work->wait();

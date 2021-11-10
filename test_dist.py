@@ -2,6 +2,7 @@ import os
 from datetime import timedelta
 
 import torch.distributed as c10d
+from torch.autograd import Variable
 
 import torch
 torch.manual_seed(2048)
@@ -25,27 +26,37 @@ pg_ = c10d.distributed_c10d._get_default_group()
 config = LSTransformerEncoderLayer.get_config(
     max_batch_tokens=16,
     max_seq_len=8,
-    hidden_size=16,
+    hidden_size=32,
     intermediate_size=64,
     nhead=4,
-    attn_prob_dropout_ratio=0.1,
-    activation_dropout_ratio=0.1,
-    hidden_dropout_ratio=0.1,
+    attn_prob_dropout_ratio=0.0,
+    activation_dropout_ratio=0.0,
+    hidden_dropout_ratio=0.0,
     pre_layer_norm=True,
-    fp16=True,
+    fp16=False,
     local_rank=local_rank,
 )
 
 enc_layer = LSTransformerEncoderLayer(config, pg_).cuda()
 
-hidden_states = torch.randn(2, 8, 16).cuda()
-hidden_states = torch.autograd.Variable(hidden_states, requires_grad=True)
+hidden_states = Variable(torch.randn(2, 8, 32).cuda(), requires_grad=True)
 encoder_padding_mask = torch.ones(2, 8).cuda()
-encoder_padding_mask = torch.autograd.Variable(encoder_padding_mask)
+label = torch.empty(2, dtype=torch.long).random_(5).cuda()
 
-output = enc_layer(hidden_states, encoder_padding_mask)
-print(output)
+# a = torch.ones_like(enc_layer.para)
+# enc_layer.para.data.copy_(a)
 
-# enc_layer.config.training = True
-# enc_layer.config.is_grad_enabled = True
-# print(torch.autograd.gradcheck(LSTransformerEncoderFunc.apply, [hidden_states, encoder_padding_mask, enc_layer.para, enc_layer.config]))
+x = enc_layer(hidden_states, encoder_padding_mask)
+x = x.mean(dim=1)
+
+
+mlp = torch.nn.Sequential(torch.nn.LayerNorm(32), torch.nn.Linear(32, 10)).cuda()
+x = mlp(x)
+
+loss_fn = torch.nn.CrossEntropyLoss()
+loss = loss_fn(x, label)
+# print(loss)
+
+loss.backward()
+
+print(hidden_states.grad)
