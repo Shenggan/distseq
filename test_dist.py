@@ -25,49 +25,64 @@ world_size = c10d.get_world_size()
 pg_ = c10d.distributed_c10d._get_default_group()
 
 config = LSTransformerEncoderLayer.get_config(
-    max_batch_tokens=16,
-    max_seq_len=8,
-    hidden_size=32,
-    intermediate_size=64,
-    nhead=4,
+    max_batch_tokens=12800,
+    max_seq_len=50,
+    hidden_size=1024,
+    intermediate_size=4096,
+    nhead=16,
     attn_prob_dropout_ratio=0.0,
     activation_dropout_ratio=0.0,
     hidden_dropout_ratio=0.0,
     pre_layer_norm=True,
-    fp16=False,
+    fp16=True,
     local_rank=local_rank,
 )
 
-hidden_states = Variable(torch.randn(2, 8, 32).cuda(), requires_grad=True)
-encoder_padding_mask = torch.ones(2, 8).cuda()
-label = torch.empty(2, dtype=torch.long).random_(5).cuda()
+hidden_states = Variable(torch.randn(256, 50, 1024).cuda(), requires_grad=True)
+encoder_padding_mask = torch.ones(256, 50).cuda()
+label = torch.empty(256, dtype=torch.long).random_(5).cuda()
 
 # a = torch.ones_like(enc_layer.para)
 # enc_layer.para.data.copy_(a)
 
 enc_layer = LSTransformerEncoderLayer(config, pg_).cuda()
-mlp = torch.nn.Sequential(torch.nn.LayerNorm(32), torch.nn.Linear(32, 10)).cuda()
+mlp = torch.nn.Sequential(torch.nn.LayerNorm(1024), torch.nn.Linear(1024, 128)).cuda()
 loss_fn = torch.nn.CrossEntropyLoss()
 
-iter = 10000000
+# warm-up steps
+for _ in range(10):
+    x = enc_layer(hidden_states, encoder_padding_mask)
+    x = x.mean(dim=1)
+    x = mlp(x)
+    loss = loss_fn(x, label)
+    loss.backward()
+
+iter = 1000
 enc_time = mlp_time = backward_time = 0
 for _ in range(iter):
+    torch.cuda.synchronize()
     start = time.time()
     x = enc_layer(hidden_states, encoder_padding_mask)
+
+    torch.cuda.synchronize()
     enc_time += time.time() - start
 
     x = x.mean(dim=1)
 
+    torch.cuda.synchronize()
     start = time.time()
     x = mlp(x)
+
+    torch.cuda.synchronize()
     mlp_time += time.time() - start
 
+    torch.cuda.synchronize()
     start = time.time()
     loss = loss_fn(x, label)
     loss.backward()
-    backward_time += time.time() - start
 
-    torch.cuda.sync()
+    torch.cuda.synchronize()
+    backward_time += time.time() - start
 
 print('Encoder: {:.3f} us | MLP: {:.3f} us | Backward: {:.3f} us'.format(
     enc_time * 1e6/1e5, mlp_time * 1e6/1e5, backward_time * 1e6/1e5))
