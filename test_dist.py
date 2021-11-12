@@ -84,5 +84,5 @@ for _ in range(iter):
     torch.cuda.synchronize()
     backward_time += time.time() - start
 
-print('Encoder: {:.3f} us | MLP: {:.3f} us | Backward: {:.3f} us'.format(
-    enc_time * 1e6/1e5, mlp_time * 1e6/1e5, backward_time * 1e6/1e5))
+print('Encoder: {:.3f} ms | MLP: {:.3f} ms | Backward: {:.3f} ms'.format(
+    enc_time, mlp_time, backward_time))
