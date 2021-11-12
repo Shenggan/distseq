@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import timedelta
 
 import torch.distributed as c10d
@@ -37,8 +38,6 @@ config = LSTransformerEncoderLayer.get_config(
     local_rank=local_rank,
 )
 
-enc_layer = LSTransformerEncoderLayer(config, pg_).cuda()
-
 hidden_states = Variable(torch.randn(2, 8, 32).cuda(), requires_grad=True)
 encoder_padding_mask = torch.ones(2, 8).cuda()
 label = torch.empty(2, dtype=torch.long).random_(5).cuda()
@@ -46,17 +45,26 @@ label = torch.empty(2, dtype=torch.long).random_(5).cuda()
 # a = torch.ones_like(enc_layer.para)
 # enc_layer.para.data.copy_(a)
 
-x = enc_layer(hidden_states, encoder_padding_mask)
-x = x.mean(dim=1)
-
-
+enc_layer = LSTransformerEncoderLayer(config, pg_).cuda()
 mlp = torch.nn.Sequential(torch.nn.LayerNorm(32), torch.nn.Linear(32, 10)).cuda()
-x = mlp(x)
-
 loss_fn = torch.nn.CrossEntropyLoss()
-loss = loss_fn(x, label)
-# print(loss)
 
-loss.backward()
+iter = 10000000
+enc_time = mlp_time = backward_time = 0
+for _ in range(iter):
+    start = time.time()
+    x = enc_layer(hidden_states, encoder_padding_mask)
+    enc_time += time.time() - start
 
-print(hidden_states.grad)
+    x = x.mean(dim=1)
+
+    start = time.time()
+    x = mlp(x)
+    mlp_time += time.time() - start
+
+    start = time.time()
+    loss = loss_fn(x, label)
+    loss.backward()
+    backward_time += time.time() - start
+
+print('Encoder: {:.3f} us | MLP: {:.3f} us | Backward: {:.3f} us'.format(enc_time * 1e6/1e5, mlp_time * 1e6/1e5, backward_time * 1e6/1e5))
