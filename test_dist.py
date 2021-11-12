@@ -67,5 +67,7 @@ for _ in range(iter):
     loss.backward()
     backward_time += time.time() - start
 
+    torch.cuda.sync()
+
 print('Encoder: {:.3f} us | MLP: {:.3f} us | Backward: {:.3f} us'.format(
     enc_time * 1e6/1e5, mlp_time * 1e6/1e5, backward_time * 1e6/1e5))
