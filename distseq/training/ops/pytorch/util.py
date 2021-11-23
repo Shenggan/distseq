@@ -23,7 +23,7 @@ def check_config(config):
     if config.hidden_size % config.nhead != 0:
         raise Exception(f"hidden_size % nhead != 0")
 
-    factor = 8 if config.fp16 else 4
+    factor = 8*4 if config.fp16 else 4*4
     upbound = factor * 1024
     if config.hidden_size > upbound:
         # as required by ln backward kernel currently
